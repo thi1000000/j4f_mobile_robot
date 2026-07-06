@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPLidar SLAM Map v2</title>
+  <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f1117;
+      color: #e8eaed;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 10px 16px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3142;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 { font-size: 1rem; font-weight: 600; }
+    .status { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; }
+    .ok { background: #1b4332; color: #95d5b2; }
+    .err { background: #4a1515; color: #f8a5a5; }
+    .info { color: #9aa0b4; font-size: 0.85rem; }
+    #wrap { flex: 1; position: relative; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    #legend {
+      position: absolute; bottom: 12px; left: 12px;
+      background: rgba(26,29,39,0.9); padding: 8px 12px;
+      border-radius: 8px; font-size: 0.8rem; line-height: 1.6;
+    }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RPLidar C1 — SLAM Map Realtime</h1>
+    <a href="/" style="color:#4fc3f7;font-size:0.85rem;text-decoration:none">← Dieu khien robot</a>
+    <span id="connStatus" class="status err">Đang kết nối...</span>
+    <span class="info" id="stats">—</span>
+  </header>
+  <div id="wrap">
+    <canvas id="canvas"></canvas>
+    <div id="legend">
+      <div><span class="dot" style="background:#eee"></span> Tường / vật cản</div>
+      <div><span class="dot" style="background:#4fc3f7"></span> Điểm quét lidar</div>
+      <div><span class="dot" style="background:#ff5252"></span> Vị trí robot</div>
+      <div style="margin-top:6px;color:#9aa0b4">Kéo chuột = di chuyển · Cuộn = zoom</div>
+    </div>
+  </div>
+  <script>
+    const host = location.hostname || '192.168.2.242';
+    const ros = new ROSLIB.Ros({ url: `ws://${host}:9090` });
+
+    const connEl = document.getElementById('connStatus');
+    const statsEl = document.getElementById('stats');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let mapData = null;
+    let pose = { x: 0, y: 0, theta: 0 };
+    let scanPoints = [];
+    let panX = 0, panY = 0, zoom = 40;
+    let dragging = false, lastX = 0, lastY = 0;
+    let scanCount = 0, mapCount = 0;
+    ros.on('connection', () => {
+      connEl.textContent = 'Đã kết nối ROS';
+      connEl.className = 'status ok';
+    });
+    ros.on('error', () => {
+      connEl.textContent = 'Lỗi kết nối ROS';
+      connEl.className = 'status err';
+    });
+    ros.on('close', () => {
+      connEl.textContent = 'Mất kết nối';
+      connEl.className = 'status err';
+    });
+
+    new ROSLIB.Topic({
+      ros, name: '/map', messageType: 'nav_msgs/msg/OccupancyGrid'
+    }).subscribe(msg => {
+      mapData = msg;
+      mapCount++;
+      draw();
+    });
+
+    new ROSLIB.Topic({
+      ros, name: '/pose', messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped'
+    }).subscribe(msg => {
+      const p = msg.pose.pose.position;
+      const q = msg.pose.pose.orientation;
+      pose.x = p.x;
+      pose.y = p.y;
+      pose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z));
+      draw();
+    });
+
+    new ROSLIB.Topic({
+      ros, name: '/scan', messageType: 'sensor_msgs/msg/LaserScan'
+    }).subscribe(msg => {
+      const pts = [];
+      const { ranges, angle_min, angle_increment } = msg;
+      for (let i = 0; i < ranges.length; i++) {
+        const r = ranges[i];
+        if (!isFinite(r) || r < msg.range_min || r > msg.range_max) continue;
+        const a = angle_min + i * angle_increment;
+        const lx = r * Math.cos(a), ly = r * Math.sin(a);
+        const cos_t = Math.cos(pose.theta), sin_t = Math.sin(pose.theta);
+        pts.push({
+          x: pose.x + cos_t * lx - sin_t * ly,
+          y: pose.y + sin_t * lx + cos_t * ly
+        });
+      }
+      scanPoints = pts;
+      scanCount++;
+      draw();
+    });
+
+    function resize() {
+      const wrap = document.getElementById('wrap');
+      canvas.width = wrap.clientWidth;
+      canvas.height = wrap.clientHeight;
+      draw();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function w2s(mx, my) {
+      const cx = canvas.width / 2 + panX;
+      const cy = canvas.height / 2 + panY;
+      return [cx + mx * zoom, cy - my * zoom];
+    }
+
+    function draw() {
+      ctx.fillStyle = '#1e2130';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (mapData) drawMap(mapData);
+      drawScan();
+      drawRobot();
+      statsEl.textContent = `Map: ${mapCount} · Scan: ${scanCount} · Zoom: ${zoom.toFixed(0)}px/m`;
+    }
+
+    function drawMap(msg) {
+      const { width, height, resolution } = msg.info;
+      const ox = msg.info.origin.position.x;
+      const oy = msg.info.origin.position.y;
+      const img = ctx.createImageData(width, height);
+      for (let i = 0; i < msg.data.length; i++) {
+        const v = msg.data[i];
+        let c;
+        if (v === -1) c = [35, 38, 52];
+        else if (v === 0) c = [240, 240, 240];
+        else c = [80, 80, 90];
+        const idx = i * 4;
+        img.data[idx] = c[0]; img.data[idx+1] = c[1]; img.data[idx+2] = c[2]; img.data[idx+3] = 255;
+      }
+      const off = document.createElement('canvas');
+      off.width = width; off.height = height;
+      off.getContext('2d').putImageData(img, 0, 0);
+
+      const x0 = ox, y0 = oy;
+      const x1 = ox + width * resolution, y1 = oy + height * resolution;
+      const [sx0, sy0] = w2s(x0, y1);
+      const [sx1, sy1] = w2s(x1, y0);
+      ctx.drawImage(off, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    }
+
+    function drawScan() {
+      ctx.fillStyle = '#4fc3f7';
+      for (const p of scanPoints) {
+        const [sx, sy] = w2s(p.x, p.y);
+        ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
+      }
+    }
+
+    function drawRobot() {
+      const [sx, sy] = w2s(pose.x, pose.y);
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(-pose.theta);
+      ctx.fillStyle = '#ff5252';
+      ctx.beginPath();
+      ctx.moveTo(-10, 0); ctx.lineTo(8, 6); ctx.lineTo(8, -6);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener('mouseup', () => dragging = false);
+    canvas.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      panX += e.clientX - lastX; panY += e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY; draw();
+    });
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      zoom = Math.max(5, Math.min(200, zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      draw();
+    }, { passive: false });
+
+    setInterval(draw, 200);
+  </script>
+</body>
+</html>

@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Robot — Dieu khien + SLAM</title>
+  <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f1117;
+      color: #e8eaed;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      flex-shrink: 0;
+      padding: 8px 14px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3142;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 0.95rem; font-weight: 600; }
+    .badge { font-size: 0.78rem; padding: 3px 9px; border-radius: 999px; }
+    .badge.ok { background: #1b4332; color: #95d5b2; }
+    .badge.err { background: #4a1515; color: #f8a5a5; }
+    .badge.info { background: #1a237e; color: #9fa8da; }
+    .main { flex: 1; display: flex; min-height: 0; }
+
+    /* --- Left: control --- */
+    .sidebar {
+      width: 360px;
+      flex-shrink: 0;
+      background: #111;
+      border-right: 1px solid #2d3142;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .sidebar h2 { font-size: 0.95rem; text-align: center; margin-bottom: 8px; }
+    .grid { display: grid; gap: 12px; }
+    #pad {
+      touch-action: none;
+      width: 240px; height: 240px;
+      background: #222; border: 2px solid #555; border-radius: 50%;
+      position: relative; margin: 0 auto;
+    }
+    #knob {
+      width: 56px; height: 56px; background: #00bcd4; border-radius: 50%;
+      position: absolute; left: 92px; top: 92px;
+    }
+    .panel { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 10px 12px; }
+    .panel h3 { margin: 0 0 8px; font-size: 0.82rem; color: #9aa0b4; font-weight: 600; }
+    .line { margin: 4px 0; font-size: 0.88rem; }
+    label.speed { display: flex; align-items: center; gap: 8px; font-size: 0.88rem; }
+    input[type=range] { flex: 1; accent-color: #00bcd4; }
+    .speed-val { min-width: 68px; text-align: right; color: #00bcd4; font-variant-numeric: tabular-nums; font-size: 0.82rem; }
+    button { background: #333; color: #eee; border: 1px solid #555; border-radius: 8px; padding: 7px 12px; font-size: 0.85rem; cursor: pointer; }
+    button:active { background: #444; }
+    .btn-stop { background: #b71c1c; border-color: #e53935; font-weight: 700; width: 100%; padding: 12px; font-size: 0.95rem; }
+    .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
+    .conn { text-align: center; font-size: 0.82rem; margin-bottom: 8px; }
+    .conn.ok { color: #81c784; }
+    .conn.err { color: #e57373; }
+
+    /* --- Right: map --- */
+    .map-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: #0f1117;
+    }
+    .map-bar {
+      flex-shrink: 0;
+      padding: 6px 12px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3142;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      font-size: 0.82rem;
+    }
+    .map-bar .info { color: #9aa0b4; }
+    #wrap { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+    canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    #legend {
+      position: absolute; bottom: 10px; right: 10px;
+      background: rgba(26,29,39,0.92); padding: 8px 12px;
+      border-radius: 8px; font-size: 0.75rem; line-height: 1.55;
+    }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+
+    @media (max-width: 800px) {
+      .main { flex-direction: column; }
+      .sidebar { width: 100%; max-height: 45vh; border-right: none; border-bottom: 1px solid #2d3142; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Robot — Dieu khien + SLAM Map</h1>
+    <span id="espConn" class="badge err">ESP32 UART</span>
+    <span id="rosConn" class="badge err">ROS</span>
+  </header>
+
+  <div class="main">
+    <aside class="sidebar">
+      <h2>Dieu khien</h2>
+      <div id="conn" class="conn err">Cho du lieu tu ESP32...</div>
+      <div class="grid">
+        <div id="pad"><div id="knob"></div></div>
+        <div class="line" id="angle" style="text-align:center">Angle: 0 deg</div>
+        <div class="line" id="mag" style="text-align:center">Magnitude: 0.00</div>
+        <button type="button" id="btnStop" class="btn-stop">STOP</button>
+
+        <div class="panel">
+          <h3>Toc do toi da (JOYSTICK_V)</h3>
+          <label class="speed">
+            <input type="range" id="speedSlider" min="0" max="100" value="40" />
+            <span class="speed-val" id="speedVal">40% (40 RPM)</span>
+          </label>
+        </div>
+
+        <div class="panel">
+          <h3>Do nhay cua (JOYSTICK_K)</h3>
+          <label class="speed">
+            <input type="range" id="kSlider" min="1" max="20" step="1" value="10" />
+            <span class="speed-val" id="kVal">K = 10</span>
+          </label>
+        </div>
+
+        <div class="panel">
+          <h3>Odometry (ESP32)</h3>
+          <div class="line mono" id="odomX">x: 0.000 m</div>
+          <div class="line mono" id="odomY">y: 0.000 m</div>
+          <div class="line mono" id="odomT">theta: 0.0 deg</div>
+          <div class="line mono" id="odomP">pulse A: 0 | B: 0</div>
+          <div class="line mono" id="odomR">RPM A: 0 | B: 0</div>
+          <button type="button" id="resetOdom" style="margin-top:8px">Reset odometry</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="map-area">
+      <div class="map-bar">
+        <span class="info" id="mapStats">Map: — · Scan: — · Zoom: —</span>
+      </div>
+      <div id="wrap">
+        <canvas id="canvas"></canvas>
+        <div id="legend">
+          <div><span class="dot" style="background:#eee"></span> Tuong / vat can</div>
+          <div><span class="dot" style="background:#4fc3f7"></span> Diem quet lidar</div>
+          <div><span class="dot" style="background:#ff5252"></span> Vi tri robot (SLAM)</div>
+          <div style="margin-top:4px;color:#9aa0b4">Keo = di chuyen · Cuon = zoom</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+<script>
+/* ===== Joystick / UART control ===== */
+const pad = document.getElementById('pad');
+const knob = document.getElementById('knob');
+const angleEl = document.getElementById('angle');
+const magEl = document.getElementById('mag');
+const speedSlider = document.getElementById('speedSlider');
+const speedVal = document.getElementById('speedVal');
+const kSlider = document.getElementById('kSlider');
+const kVal = document.getElementById('kVal');
+const connEl = document.getElementById('conn');
+const espConnEl = document.getElementById('espConn');
+
+const JR = 120, JKR = 28;
+let cx = 0, cy = 0, lastSent = 0;
+
+function updateCenter() {
+  const rect = pad.getBoundingClientRect();
+  cx = rect.left + rect.width / 2;
+  cy = rect.top + rect.height / 2;
+}
+updateCenter();
+window.addEventListener('resize', updateCenter);
+
+function sendJoystick(angle, mag) {
+  const now = Date.now();
+  if (now - lastSent < 50) return;
+  lastSent = now;
+  fetch('/joystick', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ angle, mag })
+  }).catch(() => {});
+}
+
+function sendSpeed(pct) {
+  fetch('/speed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pct }) }).catch(() => {});
+}
+
+function sendK(k) {
+  fetch('/k', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ k }) }).catch(() => {});
+}
+
+function setKnob(dx, dy, send=true) {
+  const dist = Math.hypot(dx, dy);
+  if (dist > JR) { dx = dx * JR / dist; dy = dy * JR / dist; }
+  knob.style.left = (dx + JR - JKR) + 'px';
+  knob.style.top = (dy + JR - JKR) + 'px';
+  const angle = (Math.atan2(-dy, dx) * 180 / Math.PI + 360) % 360;
+  const mag = Math.min(Math.hypot(dx, dy) / JR, 1);
+  angleEl.textContent = 'Angle: ' + angle.toFixed(1) + ' deg';
+  magEl.textContent = 'Magnitude: ' + mag.toFixed(2);
+  if (send) sendJoystick(angle, mag);
+}
+
+pad.addEventListener('pointerdown', e => { updateCenter(); setKnob(e.clientX - cx, e.clientY - cy, true); });
+pad.addEventListener('pointermove', e => { if (e.buttons) setKnob(e.clientX - cx, e.clientY - cy, true); });
+pad.addEventListener('pointerup', () => setKnob(0, 0, true));
+pad.addEventListener('pointercancel', () => setKnob(0, 0, true));
+pad.addEventListener('pointerleave', e => { if (!e.buttons) setKnob(0, 0, true); });
+
+document.getElementById('btnStop').addEventListener('click', () => {
+  knob.style.left = (JR - JKR) + 'px';
+  knob.style.top = (JR - JKR) + 'px';
+  angleEl.textContent = 'Angle: 0 deg';
+  magEl.textContent = 'Magnitude: 0.00';
+  fetch('/stop', { method: 'POST' }).catch(() => {});
+});
+
+function updateSpeedLabel(pct) {
+  speedVal.textContent = pct + '% (' + (100 * pct / 100).toFixed(0) + ' RPM max)';
+}
+speedSlider.addEventListener('input', () => { updateSpeedLabel(+speedSlider.value); sendSpeed(+speedSlider.value); });
+updateSpeedLabel(40);
+
+function updateKLabel(k) { kVal.textContent = 'K = ' + k; }
+kSlider.addEventListener('input', () => { updateKLabel(+kSlider.value); sendK(+kSlider.value); });
+updateKLabel(10);
+
+document.getElementById('resetOdom').addEventListener('click', () => {
+  fetch('/odom/reset', { method: 'POST' }).catch(() => {});
+});
+
+async function pollOdom() {
+  try {
+    const r = await fetch('/odom');
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('odomX').textContent = 'x: ' + d.x.toFixed(3) + ' m';
+    document.getElementById('odomY').textContent = 'y: ' + d.y.toFixed(3) + ' m';
+    document.getElementById('odomT').textContent = 'theta: ' + d.theta_deg.toFixed(1) + ' deg';
+    document.getElementById('odomP').textContent = 'pulse A: ' + d.pulse_a + ' | B: ' + d.pulse_b;
+    document.getElementById('odomR').textContent = 'RPM A: ' + d.rpm_a.toFixed(1) + ' | B: ' + d.rpm_b.toFixed(1);
+
+    const age = Date.now() - (d.last_esp_ms || 0);
+    const ok = d.last_esp_ms && age < 2000;
+    connEl.textContent = ok ? 'ESP32 UART OK' : 'Mat ket noi ESP32 UART';
+    connEl.className = 'conn ' + (ok ? 'ok' : 'err');
+    espConnEl.textContent = ok ? 'ESP32 OK' : 'ESP32 mat ket noi';
+    espConnEl.className = 'badge ' + (ok ? 'ok' : 'err');
+
+    if (typeof d.speed_pct === 'number' && document.activeElement !== speedSlider) {
+      speedSlider.value = d.speed_pct;
+      updateSpeedLabel(d.speed_pct);
+    }
+    if (typeof d.joystick_k === 'number' && document.activeElement !== kSlider) {
+      kSlider.value = d.joystick_k;
+      updateKLabel(d.joystick_k);
+    }
+  } catch (_) {}
+}
+setInterval(pollOdom, 200);
+pollOdom();
+
+/* ===== SLAM map (ROS) ===== */
+const rosHost = location.hostname || '192.168.2.242';
+const ros = new ROSLIB.Ros({ url: `ws://${rosHost}:9090` });
+const rosConnEl = document.getElementById('rosConn');
+const mapStatsEl = document.getElementById('mapStats');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let mapData = null;
+let pose = { x: 0, y: 0, theta: 0 };
+let scanPoints = [];
+let panX = 0, panY = 0, zoom = 40;
+let dragging = false, lastX = 0, lastY = 0;
+let scanCount = 0, mapCount = 0;
+
+ros.on('connection', () => {
+  rosConnEl.textContent = 'ROS OK';
+  rosConnEl.className = 'badge ok';
+});
+ros.on('error', () => {
+  rosConnEl.textContent = 'ROS loi';
+  rosConnEl.className = 'badge err';
+});
+ros.on('close', () => {
+  rosConnEl.textContent = 'ROS mat ket noi';
+  rosConnEl.className = 'badge err';
+});
+
+new ROSLIB.Topic({ ros, name: '/map', messageType: 'nav_msgs/msg/OccupancyGrid' })
+  .subscribe(msg => { mapData = msg; mapCount++; draw(); });
+
+new ROSLIB.Topic({ ros, name: '/pose', messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped' })
+  .subscribe(msg => {
+    const p = msg.pose.pose.position;
+    const q = msg.pose.pose.orientation;
+    pose.x = p.x; pose.y = p.y;
+    pose.theta = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z));
+    draw();
+  });
+
+new ROSLIB.Topic({ ros, name: '/scan', messageType: 'sensor_msgs/msg/LaserScan' })
+  .subscribe(msg => {
+    const pts = [];
+    const { ranges, angle_min, angle_increment } = msg;
+    const cos_t = Math.cos(pose.theta), sin_t = Math.sin(pose.theta);
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      if (!isFinite(r) || r < msg.range_min || r > msg.range_max) continue;
+      const a = angle_min + i * angle_increment;
+      const lx = r * Math.cos(a), ly = r * Math.sin(a);
+      pts.push({ x: pose.x + cos_t * lx - sin_t * ly, y: pose.y + sin_t * lx + cos_t * ly });
+    }
+    scanPoints = pts;
+    scanCount++;
+    draw();
+  });
+
+function resizeMap() {
+  const wrap = document.getElementById('wrap');
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  draw();
+}
+window.addEventListener('resize', resizeMap);
+resizeMap();
+
+function w2s(mx, my) {
+  const cx = canvas.width / 2 + panX;
+  const cy = canvas.height / 2 + panY;
+  return [cx + mx * zoom, cy - my * zoom];
+}
+
+function draw() {
+  ctx.fillStyle = '#1e2130';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (mapData) drawMap(mapData);
+  drawScan();
+  drawRobot();
+  mapStatsEl.textContent = `Map: ${mapCount} · Scan: ${scanCount} · Zoom: ${zoom.toFixed(0)}px/m`;
+}
+
+function drawMap(msg) {
+  const { width, height, resolution } = msg.info;
+  const ox = msg.info.origin.position.x;
+  const oy = msg.info.origin.position.y;
+  const img = ctx.createImageData(width, height);
+  for (let i = 0; i < msg.data.length; i++) {
+    const v = msg.data[i];
+    let c = v === -1 ? [35,38,52] : v === 0 ? [240,240,240] : [80,80,90];
+    const idx = i * 4;
+    img.data[idx] = c[0]; img.data[idx+1] = c[1]; img.data[idx+2] = c[2]; img.data[idx+3] = 255;
+  }
+  const off = document.createElement('canvas');
+  off.width = width; off.height = height;
+  off.getContext('2d').putImageData(img, 0, 0);
+  const x0 = ox, y0 = oy;
+  const x1 = ox + width * resolution, y1 = oy + height * resolution;
+  const [sx0, sy0] = w2s(x0, y1);
+  const [sx1, sy1] = w2s(x1, y0);
+  ctx.drawImage(off, sx0, sy0, sx1 - sx0, sy1 - sy0);
+}
+
+function drawScan() {
+  ctx.fillStyle = '#4fc3f7';
+  for (const p of scanPoints) {
+    const [sx, sy] = w2s(p.x, p.y);
+    ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
+  }
+}
+
+function drawRobot() {
+  const [sx, sy] = w2s(pose.x, pose.y);
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(-pose.theta);
+  ctx.fillStyle = '#ff5252';
+  ctx.beginPath();
+  ctx.moveTo(-10, 0); ctx.lineTo(8, 6); ctx.lineTo(8, -6);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener('mouseup', () => dragging = false);
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  panX += e.clientX - lastX; panY += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY; draw();
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  zoom = Math.max(5, Math.min(200, zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+  draw();
+}, { passive: false });
+
+setInterval(draw, 200);
+</script>
+</body>
+</html>
