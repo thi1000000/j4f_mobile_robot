@@ -8,6 +8,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 try:
@@ -199,38 +200,69 @@ class RobotHandler(BaseHTTPRequestHandler):
         self._send_text(404, "Not found")
 
 
-def resolve_serial_port() -> str:
+def resolve_serial_port() -> Optional[str]:
     if SERIAL_PORT:
-        return SERIAL_PORT
+        return SERIAL_PORT if os.path.exists(SERIAL_PORT) else None
     for path in UART_CANDIDATES:
         if os.path.exists(path):
-            print(f"[uart] Auto-detected {path}", flush=True)
             return path
-    print("[uart] ERROR: No UART device found.", file=sys.stderr, flush=True)
+    return None
+
+
+def uart_hint() -> None:
+    print("[uart] WARN: No UART device yet.", file=sys.stderr, flush=True)
     print("  Tried:", ", ".join(UART_CANDIDATES), file=sys.stderr, flush=True)
-    print("  On Pi, enable UART:", file=sys.stderr, flush=True)
-    print("    sudo raspi-config -> Interface Options -> Serial Port", file=sys.stderr, flush=True)
-    print("    Login shell: No | Hardware UART: Yes", file=sys.stderr, flush=True)
-    print("  Or add to /boot/firmware/config.txt: enable_uart=1", file=sys.stderr, flush=True)
-    print("  Then: sudo reboot", file=sys.stderr, flush=True)
-    print("  Check: ls -l /dev/serial0 /dev/ttyAMA0", file=sys.stderr, flush=True)
-    sys.exit(1)
+    print("  Web UI still runs; UART will retry in background.", file=sys.stderr, flush=True)
+    print("  Enable UART: sudo raspi-config -> Serial Port -> shell: No, UART: Yes", file=sys.stderr, flush=True)
 
 
-def open_serial() -> serial.Serial:
-    port = resolve_serial_port()
+def open_serial(port: str) -> serial.Serial:
     print(f"[uart] Opening {port} @ {BAUD}", flush=True)
     return serial.Serial(port, BAUD, timeout=0.05)
 
 
-def main() -> None:
+def uart_connect_loop() -> None:
     global ser
-    ser = open_serial()
-    threading.Thread(target=uart_reader, daemon=True).start()
+    warned = False
+    while True:
+        try:
+            if ser is not None and ser.is_open:
+                time.sleep(2.0)
+                continue
+            port = resolve_serial_port()
+            if not port:
+                if not warned:
+                    uart_hint()
+                    warned = True
+                time.sleep(3.0)
+                continue
+            warned = False
+            with serial_lock:
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except serial.SerialException:
+                        pass
+                ser = open_serial(port)
+            time.sleep(0.3)
+            send_uart("SPD,40")
+            send_uart("K,10")
+            print("[uart] Connected", flush=True)
+        except serial.SerialException as exc:
+            print(f"[uart] Connect failed: {exc}", flush=True)
+            with serial_lock:
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except serial.SerialException:
+                        pass
+                    ser = None
+            time.sleep(3.0)
 
-    time.sleep(0.3)
-    send_uart("SPD,40")
-    send_uart("K,10")
+
+def main() -> None:
+    threading.Thread(target=uart_connect_loop, daemon=True).start()
+    threading.Thread(target=uart_reader, daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), RobotHandler)
     print(f"[http] Robot UI: http://0.0.0.0:{HTTP_PORT}/", flush=True)
@@ -239,7 +271,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        if ser and ser.is_open:
+        if ser is not None and ser.is_open:
             ser.close()
 
 
